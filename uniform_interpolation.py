@@ -37,7 +37,6 @@ The module includes the following functions:
     spchinterp1D: shape-preserving cubic Hermite interpolation in 1 dimension
 """
 # TODO: implement cubic Hermite interpolation in 2D and 3D
-# TODO: implement cubic Hermite interpolation in 3D
 
 
 import numpy as np
@@ -308,7 +307,7 @@ def linterp3D(px, py, pz, origin, ih, *data):
 
 
 @njit(cache=True, fastmath=True)
-def chinterp1D(p, origin, ih, *data):
+def chinterp1D(px, origin, ih, *data):
 
     h = 1/ih
     h2 = h**2
@@ -319,12 +318,12 @@ def chinterp1D(p, origin, ih, *data):
 
     shape = len(data[0])
 
-    i = np.int64((p - origin)*ih)
+    ix = np.int64((px - origin)*ih)
 
-    if (i == shape - 1):
-        i -= 1
+    if (ix == shape - 1):
+        ix -= 1
 
-    s = p - (origin + h*i)
+    s = px - (origin + h*ix)
     s2 = s**2
     s3 = s**3
 
@@ -336,18 +335,18 @@ def chinterp1D(p, origin, ih, *data):
     result = np.empty(ndata, dtype=data[0].dtype)
     for j in range(ndata):
 
-        f0 = data[j][i]
-        fp1 = data[j][i + 1]
+        f0 = data[j][ix]
+        fp1 = data[j][ix + 1]
 
-        if i == 0:
+        if ix == 0:
             fm1 = fp1
-            fp2 = data[j][i + 2]
-        elif i == shape - 2:
-            fm1 = data[j][i - 1]
+            fp2 = data[j][ix + 2]
+        elif ix == shape - 2:
+            fm1 = data[j][ix - 1]
             fp2 = f0
         else:
-            fm1 = data[j][i - 1]
-            fp2 = data[j][i + 2]
+            fm1 = data[j][ix - 1]
+            fp2 = data[j][ix + 2]
 
         result[j] = fm1*cm1 + f0*c0 + fp1*cp1 + fp2*cp2
 
@@ -355,7 +354,7 @@ def chinterp1D(p, origin, ih, *data):
 
 
 @njit(cache=True, fastmath=True)
-def spchinterp1D(p, origin, ih, *data):
+def spchinterp1D(px, origin, ih, *data):
 
     h = 1/ih
     ih2 = ih**2
@@ -365,12 +364,12 @@ def spchinterp1D(p, origin, ih, *data):
 
     shape = len(data[0])
 
-    i = np.int64((p - origin)*ih)
+    ix = np.int64((px - origin)*ih)
 
-    if (i == shape - 1):
-        i -= 1
+    if (ix == shape - 1):
+        ix -= 1
 
-    s = p - (origin + h*i)
+    s = px - (origin + h*ix)
     s2 = s**2
     s3 = s**3
 
@@ -382,25 +381,25 @@ def spchinterp1D(p, origin, ih, *data):
     result = np.empty(ndata, dtype=data[0].dtype)
     for j in range(ndata):
 
-        f0 = data[j][i]
-        f1 = data[j][i + 1]
+        f0 = data[j][ix]
+        f1 = data[j][ix + 1]
 
         delta0 = (f1 - f0)*ih
 
-        if i == 0:
+        if ix == 0:
             d0 = 0
         else:
-            deltam1 = (f0 - data[j][i - 1])*ih
+            deltam1 = (f0 - data[j][ix - 1])*ih
 
             if deltam1*delta0 <= 0:
                 d0 = 0
             else:
                 d0 = 2/(1/deltam1 + 1/delta0)
 
-        if i == shape - 2:
+        if ix == shape - 2:
             d1 = 0
         else:
-            deltap1 = (data[j][i + 2] - f1)*ih
+            deltap1 = (data[j][ix + 2] - f1)*ih
 
             if delta0*deltap1 <= 0:
                 d1 = 0
