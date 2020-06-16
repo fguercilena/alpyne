@@ -1,811 +1,670 @@
-"""Functions to handle interpolation of data defined on regular grids.
-
-The functions in this module implement a few methods to interpolate data
-contained in numpy arrays. The data to interpolate can have an arbitrary
-number of dimensions, but it is constrained to be defined on an equally spaced
-grid.
-
-Equally spaced means that on each axis the grid must be of the form
-x = [origin + i*delta for i in range(n_points)]. That is, the grid spacing
-delta between two adjacent points must be a constant.
-
-This means that, e.g. in one dimension the values y = [0, 1, 4, 9], the result
-of applying the function f(x) = x**2 to the points x = [0, 1, 2, 3] can be
-interpolated using the functions provided here, but data defined on the grid
-x = [0, 1, 2.5, 6.8] cannot.
-
-This restriction allows for much greater speed than e.g.
-scipy.interpolate.interpn, because the location of the interpolation point
-on the grid can be carried out in O(1) operations, instead of O(log(n_points))
-(binary search).
-
-The implementation is sped-up using numba. The functions collected here are
-optimized for speed and not safety (e.g. they do not check for size mismatches
-in the passed arguments). They are optimized for the common use case of
-interpolating many different data arrays (with the same shape and dtype) at a
-interpolation points defined on a regular grid; however the computation is (at
-the moment) not parallelized, either over the different datasets, or over the
-interpolation points.
-
-The module includes the following functions:
-    linterpND: linear interpolation in arbitrary dimensions
-    linterp1D: linear interpolation in 1 dimension
-    linterp2D: linear interpolation in 2 dimensions
-    linterp3D: linear interpolation in 3 dimensions
-    chinterp1D: cubic Hermite interpolation in 1 dimension
-    chinterp2D: cubic Hermite interpolation in 2 dimensions
-    chinterp3D: cubic Hermite interpolation in 3 dimensions
-"""
-
-
 import numpy as np
 from numba import njit
 
 
+# Linearly interpolate one-dimensional arrays at given points. The algorithm
+# implemented in this function is replicated exactly in the following linterp2D
+# and linterp3D functions, except in 2 and 3 dimensions respectively.
 @njit(cache=True, fastmath=True)
-def linterpND(p, origin, ih, *data):
-    """Linearly interpolate multidimensional arrays at a given point.
-
-    The interpolation is linear on each dimension of the data. Note that this
-    function does not interpolate on a grid of points, but at a single one.
+def linterp1D(p_x, o, ih, data):
+    """Linearly interpolate one-dimensional arrays at given points.
 
     Arguments:
-    p      -- array of floats, shape=(n,): interpolation point
-    origin -- array of floats, shape=(n,): first point of the grid for each
-              dimension
-    ih     -- array of floats, shape=(n,): inverse of the grid spacing on each
-              dimension
-    data   -- arrays of floats, each of shape=(s0, s1, s2, .., sn): the data to
-              interpolate
+    p_x  -- 1D array:               interpolation points
+    o    -- scalar:                 first point of the grid
+    ih   -- scalar:                 inverse of the grid spacing
+    data -- array of shape (N, Nx): the data to be interpolated
 
     Returns:
-    result -- array of floats, shape=(len(data),): the result of the
-              interpolation for each data array
-
-    Notes:
-    No check is performed to ensure that the arguments have compatible shapes.
-
-    Extrapolation is not handled: if the interpolation points is outside the
-    region covered by the data, the function will crash or (worse) silently
-    return nonsensical results.
-
-    For the common cases of interpolation in 1, 2 or 3 dimensions, the
-    functions linterp1D, linterp2D and linterp3D should be preferred, as they
-    should be faster.
-
-    The interpolation is linear along each dimension of the input data. This
-    leads to the common misconception that the method is first order accurate
-    with respect to the grid spacing. It is actually second order accurate,
-    i.e. the error term behaves asymptotically as O(ih**2) (assuming the
-    interpolation point is fixed as the grid spacing shrinks).
+    result -- array of shape (N, len(px)): the result of
+              the interpolation for each data array at each point
     """
 
-    ndata = len(data)
-
-    shape = np.array(data[0].shape, dtype=np.int64)
-    d = len(shape)
-
-    aux = (p - origin)*ih
-
-    ind = aux.astype(np.int64)
-    for i in range(d):
-        if (ind[i] == shape[i] - 1):
-            ind[i] -= 1
-
-    coeff = np.empty(d)
-    coeff = 1 - aux + ind
-
-    aux = shape
-    aux[0] = 1
-    aux = np.cumprod(np.roll(aux, -1)[::-1])[::-1]
-
-    a = np.array((0, 1), dtype=np.int64)
-    vertices = np.empty((2**d, d), dtype=np.int64)
-
-    vertices[:, 0] = np.repeat(a, 2**(d - 1))
-    for i in range(1, d):
-        for j in range(2**i):
-            s = d - i
-            vertices[j*2**s:(j + 1)*2**s, i] = np.repeat(a, 2**(s - 1))
-
-    result = np.zeros(ndata, dtype=data[0].dtype)
-
-    for n in range(2**d):
-
-        vertex = vertices[n]
-        i = np.sum((ind + vertex)*aux)
-        c = np.prod(np.abs(vertex - coeff))
-
-        for j in range(ndata):
-            result[j] += data[j].flat[i]*c
-
-    return result
-
-
-@njit(cache=True, fastmath=True)
-def linterp1D(px, origin, ih, *data):
-    """Linearly interpolate one-dimensional arrays at a given points.
-
-    Arguments:
-    px     -- array of floats: interpolation points
-    origin -- float: first point of the grid
-    ih     -- float: inverse of the grid spacing
-    data   -- arrays of floats, each of shape=(s,): the data to interpolate
-
-    Returns:
-    result -- array of floats, shape=(len(data), len(px)): the result of
-              the interpolation for each data array and each point
-
-    Notes:
-    No check is performed to ensure that the arguments have the right shapes.
-
-    Extrapolation is not handled: if the interpolation points is outside the
-    region covered by the data, the function will crash or (worse) silently
-    return nonsensical results.
-
-    The interpolation is linear. This leads to the common misconception that
-    the method is first order accurate with respect to the grid spacing. It is
-    actually second order accurate, i.e. the error term behaves asymptotically
-    as O(ih**2) (assuming the interpolation point is fixed as the grid
-    spacing shrinks).
-    """
-
-    npointsx = len(px)
+    # Get the number of interpolation points, the number of input arrays, the
+    # shape (in this case, the length) of the input arrays, and allocate the
+    # result array.
+    npoints = len(p_x)
 
     ndata = len(data)
 
     shape = len(data[0])
 
-    result = np.empty((ndata, npointsx), dtype=data[0].dtype)
+    result = np.empty((ndata, npoints), dtype=data[0].dtype)
 
-    for i in range(npointsx):
+    # Loop over the interpolation points. Depending on the application, this
+    # loop might be parallelized (if npoints is large enough, e.g. a few
+    # hundred) to have better performance.
+    for p in range(npoints):
 
-        auxx = (px[i] - origin)*ih
+        aux_x = (p_x[p] - o)*ih
 
-        ix = np.int64(auxx)
+        # Compute the index of the point in the array immediately preceding
+        # the interpolation point
+        i = np.int64(aux_x)
 
-        if (ix == shape - 1):
-            ix -= 1
+        if (i == shape - 1):
+            i -= 1
 
-        cpx = auxx - ix
-        cx = 1 - cpx
+        # Compute the interpolation coefficients. c_x0 is applied to the point
+        # at index i, while c_x1 at the next point (at index i + 1)
+        c_x1 = aux_x - i
+        c_x0 = 1. - c_x1
+
+        # Loop over the input arrays, and interpolate each of them using the
+        # coefficients computed above. There is most likely no need to
+        # parallelize this loop, because the bumber of input arrays is small
+        # in most applications (typically a few tens at most).
+        for n in range(ndata):
+
+            f_x0 = data[n][i]
+            f_x1 = data[n][i + 1]
+
+            result[n, p] = f_x0*c_x0 + f_x1*c_x1
+
+    return result
+
+
+@njit(cache=True, fastmath=True)
+def linterp2D(p_x, p_y, o, ih, data):
+    """Linearly interpolate two-dimensional arrays at given points.
+
+    Arguments:
+    p_x  -- 1D array:               interpolation points in x
+    p_y  -- 1D array of len(px):    interpolation points in y
+    o    -- 1D array of len 2:      first point of the grid
+    ih   -- 1D array of len 2:      inverse of the grid spacing
+    data -- array of shape (N, Nx, Ny): the data to be interpolated
+
+    Returns:
+    result -- array of shape (N, len(px)): the result of
+              the interpolation for each data array at each point
+    """
+
+    assert len(p_x) == len(p_y)
+    npoints = len(p_x)
+
+    ndata = len(data)
+
+    shape = data[0].shape
+
+    result = np.empty((ndata, npoints), dtype=data[0].dtype)
+
+    for p in range(npoints):
+
+        aux_x = (p_x[p] - o[0])*ih[0]
+        aux_y = (p_y[p] - o[1])*ih[1]
+
+        i = np.int64(aux_x)
+        j = np.int64(aux_y)
+
+        if (i == shape[0] - 1):
+            i -= 1
+        if (j == shape[1] - 1):
+            j -= 1
+
+        c_x1 = aux_x - i
+        c_x0 = 1. - c_x1
+        c_y1 = aux_y - j
+        c_y0 = 1. - c_y1
 
         for n in range(ndata):
-            result[n, i] = data[n][ix]*cx + data[n][ix + 1]*cpx
+
+            f_x0_y0 = data[n][i, j]
+            f_x1_y0 = data[n][i + 1, j]
+            f_x0_y1 = data[n][i, j + 1]
+            f_x1_y1 = data[n][i + 1, j + 1]
+
+            result[n, p] = (+ f_x0_y0*c_x0*c_y0 + f_x1_y0*c_x1*c_y0
+                            + f_x0_y1*c_x0*c_y1 + f_x1_y1*c_x1*c_y1)
 
     return result
 
 
 @njit(cache=True, fastmath=True)
-def linterp2D(px, py, origin, ih, *data):
-    """Linearly interpolate two-dimensional arrays at a given points.
-
-    The interpolation is linear on each dimension of the data.
+def linterp3D(p_x, p_y, p_z, o, ih, data):
+    """Linearly interpolate three-dimensional arrays at given points.
 
     Arguments:
-    px     -- array of floats: interpolation points on the first axis
-              of the data
-    py     -- array of floats: interpolation points on the second axis
-              of the data
-    origin -- array of floats, shape=(2,): first point of the grid for each
-              dimension
-    ih     -- array of floats, shape=(2,): inverse of the grid spacing on each
-              dimension
-    data   -- arrays of floats, each of shape=(s0, s1): the data to interpolate
+    p_x  -- 1D array:               interpolation points in x
+    p_y  -- 1D array of len(px):    interpolation points in y
+    p_z  -- 1D array of len(px):    interpolation points in z
+    o    -- 1D array of len 3:      first point of the grid
+    ih   -- 1D array of len 3:      inverse of the grid spacing
+    data -- array of shape (N, Nx, Ny, Nz): the data to be interpolated
 
     Returns:
-    result -- array of floats, shape=(len(data), len(px), len(py)):
-              the result of the interpolation for each data array and each
-              point. The interpolation is carried out on the grid defined by
-              the cartesian product of the arrays px and py, i.e. at points
-              [(x, y) for x in px for y in py]
-
-    Notes:
-    No check is performed to ensure that the arguments have compatible shapes.
-
-    Extrapolation is not handled: if the interpolation points is outside the
-    region covered by the data, the function will crash or (worse) silently
-    return nonsensical results.
-
-    The interpolation is linear along each dimension of the input data. This
-    leads to the common misconception that the method is first order accurate
-    with respect to the grid spacing. It is actually second order accurate,
-    i.e. the error term behaves asymptotically as O(ih**2) (assuming the
-    interpolation point is fixed as the grid spacing shrinks).
+    result -- array of shape (N, len(px)): the result of
+              the interpolation for each data array at each point
     """
 
-    npointsx = len(px)
-    npointsy = len(py)
+    assert len(p_x) == len(p_y)
+    assert len(p_x) == len(p_z)
+    npoints = len(p_x)
 
     ndata = len(data)
 
     shape = data[0].shape
 
-    result = np.empty((ndata, npointsx, npointsy), dtype=data[0].dtype)
+    result = np.empty((ndata, npoints), dtype=data[0].dtype)
 
-    for i in range(npointsx):
+    for p in range(npoints):
 
-        auxx = (px[i] - origin[0])*ih[0]
-        ix = np.int64(auxx)
+        aux_x = (p_x[p] - o[0])*ih[0]
+        aux_y = (p_y[p] - o[1])*ih[1]
+        aux_z = (p_z[p] - o[2])*ih[2]
 
-        if (ix == shape[0] - 1):
-            ix -= 1
+        i = np.int64(aux_x)
+        j = np.int64(aux_y)
+        k = np.int64(aux_z)
 
-        cpx = auxx - ix
-        cx = 1 - cpx
+        if (i == shape[0] - 1):
+            i -= 1
+        if (j == shape[1] - 1):
+            j -= 1
+        if (k == shape[2] - 1):
+            k -= 1
 
-        for j in range(npointsy):
+        c_x1 = aux_x - i
+        c_x0 = 1. - c_x1
+        c_y1 = aux_y - j
+        c_y0 = 1. - c_y1
+        c_z1 = aux_z - k
+        c_z0 = 1. - c_z1
 
-            auxy = (py[j] - origin[1])*ih[1]
-            iy = np.int64(auxy)
+        for n in range(ndata):
 
-            if (iy == shape[1] - 1):
-                iy -= 1
+            f_x0_y0_z0 = data[n][i, j, k]
+            f_x1_y0_z0 = data[n][i + 1, j, k]
+            f_x0_y1_z0 = data[n][i, j + 1, k]
+            f_x1_y1_z0 = data[n][i + 1, j + 1, k]
+            f_x0_y0_z1 = data[n][i, j, k + 1]
+            f_x1_y0_z1 = data[n][i + 1, j, k + 1]
+            f_x0_y1_z1 = data[n][i, j + 1, k + 1]
+            f_x1_y1_z1 = data[n][i + 1, j + 1, k + 1]
 
-            cpy = auxy - iy
-            cy = 1 - cpy
-
-            for n in range(ndata):
-                result[n, i, j] = (data[n][ix, iy]*cx*cy +
-                                   data[n][ix + 1, iy]*cpx*cy +
-                                   data[n][ix, iy + 1]*cx*cpy +
-                                   data[n][ix + 1, iy + 1]*cpx*cpy)
-
-    return result
-
-
-@njit(cache=True, fastmath=True)
-def linterp3D(px, py, pz, origin, ih, *data):
-    """Linearly interpolate two-dimensional arrays at a given points.
-
-    The interpolation is linear on each dimension of the data.
-
-    Arguments:
-    px     -- array of floats: interpolation points on the first axis
-              of the data
-    py     -- array of floats: interpolation points on the second axis
-              of the data
-    pz     -- array of floats: interpolation points on the third axis
-              of the data
-    origin -- array of floats, shape=(3,): first point of the grid for each
-              dimension
-    ih     -- array of floats, shape=(3,): inverse of the grid spacing on each
-              dimension
-    data   -- arrays of floats, each of shape=(s0, s1, s2): the data to
-              interpolate
-
-    Returns:
-    result -- array of floats, shape=(len(data), len(px), len(py, len(pz))):
-              the result of the interpolation for each data array and each
-              point. The interpolation is carried out on the grid defined by
-              the cartesian product of the arrays px, py and pz, i.e. at points
-              [(x, y, z) for x in px for y in py for z in pz]
-
-    Notes:
-    No check is performed to ensure that the arguments have compatible shapes.
-
-    Extrapolation is not handled: if the interpolation points is outside the
-    region covered by the data, the function will crash or (worse) silently
-    return nonsensical results.
-
-    The interpolation is linear along each dimension of the input data. This
-    leads to the common misconception that the method is first order accurate
-    with respect to the grid spacing. It is actually second order accurate,
-    i.e. the error term behaves asymptotically as O(ih**2) (assuming the
-    interpolation point is fixed as the grid spacing shrinks).
-    """
-
-    npointsx = len(px)
-    npointsy = len(py)
-    npointsz = len(pz)
-
-    ndata = len(data)
-
-    shape = data[0].shape
-
-    result = np.empty((ndata, npointsx, npointsy, npointsz),
-                      dtype=data[0].dtype)
-
-    for i in range(npointsx):
-
-        auxx = (px[i] - origin[0])*ih[0]
-        ix = np.int64(auxx)
-
-        if (ix == shape[0] - 1):
-            ix -= 1
-
-        cpx = auxx - ix
-        cx = 1 - cpx
-
-        for j in range(npointsy):
-
-            auxy = (py[j] - origin[1])*ih[1]
-            iy = np.int64(auxy)
-
-            if (iy == shape[1] - 1):
-                iy -= 1
-
-            cpy = auxy - iy
-            cy = 1 - cpy
-
-            for k in range(npointsz):
-
-                auxz = (pz[k] - origin[2])*ih[2]
-                iz = np.int64(auxz)
-
-                if (iz == shape[2] - 1):
-                    iz -= 1
-
-                cpz = auxz - iz
-                cz = 1 - cpz
-
-                for n in range(ndata):
-                    result[n, i, j, k] = \
-                        (data[n][ix, iy, iz]*cx*cy*cz +
-                         data[n][ix + 1, iy, iz]*cpx*cy*cz +
-                         data[n][ix, iy + 1, iz]*cx*cpy*cz +
-                         data[n][ix + 1, iy + 1, iz]*cpx*cpy*cz +
-                         data[n][ix, iy, iz + 1]*cx*cy*cpz +
-                         data[n][ix + 1, iy, iz + 1]*cpx*cy*cpz +
-                         data[n][ix, iy + 1, iz + 1]*cx*cpy*cpz +
-                         data[n][ix + 1, iy + 1, iz + 1]*cpx*cpy*cpz)
+            result[n, p] = (+ f_x0_y0_z0*c_x0*c_y0*c_z0
+                            + f_x1_y0_z0*c_x1*c_y0*c_z0
+                            + f_x0_y1_z0*c_x0*c_y1*c_z0
+                            + f_x1_y1_z0*c_x1*c_y1*c_z0
+                            + f_x0_y0_z1*c_x0*c_y0*c_z1
+                            + f_x1_y0_z1*c_x1*c_y0*c_z1
+                            + f_x0_y1_z1*c_x0*c_y1*c_z1
+                            + f_x1_y1_z1*c_x1*c_y1*c_z1)
 
     return result
 
 
+# Cubic Hermite interpolation one-dimensional arrays at given points. The
+# algorithm implemented in this function is replicated exactly in the following
+# chinterp2D and chinterp3D functions, except in 2 and 3 dimensions
+# respectively.
 @njit(cache=True, fastmath=True)
-def chinterp1D(px, origin, ih, *data):
-    """Cubic hermite interpolation of one-dimensional arrays at a given points.
-
-    The derivatives of the interpolating polynomial are estimated with a
-    3-point centered stencil.
+def chinterp1D(p_x, o, ih, data):
+    """Cubic Hermite interpolation of one-dimensional arrays at given points.
 
     Arguments:
-    px     -- array of floats: interpolation points
-    origin -- float: first point of the grid
-    ih     -- float: inverse of the grid spacing
-    data   -- arrays of floats, each of shape=(s,): the data to interpolate
+    p_x  -- 1D array:               interpolation points in x
+    o    -- scalar:                 first point of the grid
+    ih   -- scalar:                 inverse of the grid spacing
+    data -- array of shape (N, Nx): the data to be interpolated
 
     Returns:
-    result -- array of floats, shape=(len(data), len(px)): the result of
-              the interpolation for each data array and each point
-
-    Notes:
-    No check is performed to ensure that the arguments have the right shapes.
-
-    Extrapolation is not handled: if the interpolation points is outside the
-    region covered by the data, the function will crash or (worse) silently
-    return nonsensical results. Furthermore, 2 ghost points are needed.
-
-    The interpolation is cubic. This leads to the common misconception that
-    the method is third order accurate with respect to the grid spacing. It is
-    actually fourth order accurate, i.e. the error term behaves asymptotically
-    as O(ih**4) (assuming the interpolation point is fixed as the grid
-    spacing shrinks).
+    result -- array of shape (N, len(px)): the result of
+              the interpolation for each data array at each point
     """
 
-    h = 1/ih
-    h2 = h**2
-    h3 = h2*h
-    ih3 = ih**3
-
-    npointsx = len(px)
+    # Get the number of interpolation points, the number of input arrays, the
+    # shape (in this case, the length) of the input arrays, and allocate the
+    # result array.
+    npoints = len(p_x)
 
     ndata = len(data)
 
     shape = len(data[0])
 
-    result = np.empty((ndata, npointsx), dtype=data[0].dtype)
+    result = np.empty((ndata, npoints), dtype=data[0].dtype)
 
-    for i in range(npointsx):
+    h = 1./ih
 
-        ix = np.int64((px[i] - origin)*ih)
+    # Loop over the interpolation points. Depending on the application, this
+    # loop might be parallelized (if npoints is large enough, e.g. a few
+    # hundred) to have better performance.
+    for p in range(npoints):
 
-        if (ix == shape - 1):
-            ix -= 1
+        # Compute the index of the point in the array immediately preceding
+        # the interpolation point
+        i = np.int64((p_x[p] - o)*ih)
 
-        sx = px[i] - (origin + h*ix)
-        sx2 = sx**2
-        sx3 = sx2*sx
+        if (i == shape - 1):
+            i -= 1
 
-        c_xm1 = (2*sx2*h - sx*h2 - sx3)*ih3*0.5
-        c_x0 = (2*h3 - 5*h*sx2 + 3*sx3)*ih3*0.5
-        c_xp1 = (sx*h2 + 4*h*sx2 - 3*sx3)*ih3*0.5
-        c_xp2 = (sx3 - sx2*h)*ih3*0.5
+        # Compute the displacement of the interpolation point from the point of
+        # index i, normalized to the grid spacing (\(s_x\in [0, 1)\))
+        s_x = (p_x[p] - (o + h*i))*ih
+
+        # Compute the coefficients. c_x00 is applied to f_x00 (i.e. \(f_0\))
+        # and so on.
+        c_x00 = (1. + 2.*s_x)*(1. - s_x)**2 - 0.5*s_x**2*(s_x - 1.)
+        c_xp1 = s_x**2*(3. - 2.*s_x) + 0.5*s_x*(1. - s_x)**2
+        c_xm1 = -0.5*s_x*(1. - s_x)**2
+        c_xp2 = 0.5*s_x**2*(s_x - 1.)
+
+        # Loop over the input arrays, and interpolate each of them using the
+        # coefficients computed above. There is most likely no need to
+        # parallelize this loop, because the bumber of input arrays is small
+        # in most applications (typically a few tens at most).
+        for n in range(ndata):
+
+            f_x00 = data[n][i]
+            f_xp1 = data[n][i + 1]
+            f_xm1 = data[n][i - 1]
+            f_xp2 = data[n][i + 2]
+
+            result[n, p] = (+ f_x00*c_x00 + f_xp1*c_xp1
+                            + f_xm1*c_xm1 + f_xp2*c_xp2)
+
+    return result
+
+
+@njit(cache=True, fastmath=True)
+def chinterp2D(p_x, p_y, o, ih, data):
+    """Cubic Hermite interpolation of two-dimensional arrays at given points.
+
+    Arguments:
+    p_x  -- 1D array:               interpolation points in x
+    p_y  -- 1D array of len(px):    interpolation points in y
+    o    -- 1D array of len 2:      first point of the grid
+    ih   -- 1D array of len 2:      inverse of the grid spacing
+    data -- array of shape (N, Nx, Ny): the data to be interpolated
+
+    Returns:
+    result -- array of shape (N, len(px)): the result of
+              the interpolation for each data array at each point
+    """
+
+    assert len(p_x) == len(p_y)
+    npoints = len(p_x)
+
+    ndata = len(data)
+
+    shape = data[0].shape
+
+    result = np.empty((ndata, npoints), dtype=data[0].dtype)
+
+    h = 1./ih
+
+    for p in range(npoints):
+
+        i = np.int64((p_x[p] - o[0])*ih[0])
+        j = np.int64((p_y[p] - o[1])*ih[1])
+
+        if (i == shape[0] - 1):
+            i -= 1
+        if (j == shape[1] - 1):
+            j -= 1
+
+        s_x = (p_x[p] - (o[0] + h[0]*i))*ih[0]
+        s_y = (p_y[p] - (o[1] + h[1]*j))*ih[1]
+
+        c_x00 = (1. + 2.*s_x)*(1. - s_x)**2 - 0.5*s_x**2*(s_x - 1.)
+        c_xp1 = s_x**2*(3. - 2.*s_x) + 0.5*s_x*(1. - s_x)**2
+        c_xm1 = -0.5*s_x*(1. - s_x)**2
+        c_xp2 = 0.5*s_x**2*(s_x - 1.)
+        c_y00 = (1. + 2.*s_y)*(1. - s_y)**2 - 0.5*s_y**2*(s_y - 1.)
+        c_yp1 = s_y**2*(3. - 2.*s_y) + 0.5*s_y*(1. - s_y)**2
+        c_ym1 = -0.5*s_y*(1. - s_y)**2
+        c_yp2 = 0.5*s_y**2*(s_y - 1.)
 
         for n in range(ndata):
 
-            f_x0 = data[n][ix]
-            f_xp1 = data[n][ix + 1]
-            f_xm1 = data[n][ix - 1]
-            f_xp2 = data[n][ix + 2]
+            f_x00_y00 = data[n][i, j]
+            f_xp1_y00 = data[n][i + 1, j]
+            f_xm1_y00 = data[n][i - 1, j]
+            f_xp2_y00 = data[n][i + 2, j]
+            f_x00_yp1 = data[n][i, j + 1]
+            f_xp1_yp1 = data[n][i + 1, j + 1]
+            f_xm1_yp1 = data[n][i - 1, j + 1]
+            f_xp2_yp1 = data[n][i + 2, j + 1]
+            f_x00_ym1 = data[n][i, j - 1]
+            f_xp1_ym1 = data[n][i + 1, j - 1]
+            f_xm1_ym1 = data[n][i - 1, j - 1]
+            f_xp2_ym1 = data[n][i + 2, j - 1]
+            f_x00_yp2 = data[n][i, j + 2]
+            f_xp1_yp2 = data[n][i + 1, j + 2]
+            f_xm1_yp2 = data[n][i - 1, j + 2]
+            f_xp2_yp2 = data[n][i + 2, j + 2]
 
-            result[n, i] = f_xm1*c_xm1 + f_x0*c_x0 + f_xp1*c_xp1 + f_xp2*c_xp2
-
-    return result
-
-
-@njit(cache=True, fastmath=True)
-def chinterp2D(px, py, origin, ih, *data):
-    """Cubic hermite interpolation of two-dimensional arrays at given points.
-
-    The derivatives of the interpolating polynomial are estimated with a
-    3-point centered stencil.
-
-    Arguments:
-    px     -- array of floats: interpolation points on the first axis
-    py     -- array of floats: interpolation points on the second axis
-    origin -- array of floats, shape=(2,): first point of the grid
-    ih     -- array of floats, shape=(2,): inverse of the grid spacing
-    data   -- arrays of floats, each of shape=(s0, s1): the data to interpolate
-
-    Returns:
-    result -- array of floats, shape=(len(data), len(px), len(py)): the result
-              of the interpolation for each data array and each point. The
-              interpolation is carried out on the grid defined by
-              the cartesian product of the arrays px and py, i.e. at points
-              [(x, y) for x in px for y in py]
-
-    Notes:
-    No check is performed to ensure that the arguments have the right shapes.
-
-    Extrapolation is not handled: if the interpolation points is outside the
-    region covered by the data, the function will crash or (worse) silently
-    return nonsensical results. Furthermore, 2 ghost points are needed.
-
-    The interpolation is cubic. This leads to the common misconception that
-    the method is third order accurate with respect to the grid spacing. It is
-    actually fourth order accurate, i.e. the error term behaves asymptotically
-    as O(ih**4) (assuming the interpolation point is fixed as the grid
-    spacing shrinks).
-    """
-
-    h = 1/ih
-    h2 = h**2
-    h3 = h2*h
-    ih3 = ih**3
-
-    npointsx = len(px)
-    npointsy = len(py)
-
-    ndata = len(data)
-
-    shape = data[0].shape
-
-    result = np.empty((ndata, npointsx, npointsy), dtype=data[0].dtype)
-
-    for i in range(npointsx):
-
-        ix = np.int64((px[i] - origin[0])*ih[0])
-
-        if (ix == shape[0] - 1):
-            ix -= 1
-
-        sx = px[i] - (origin[0] + h[0]*ix)
-        sx2 = sx**2
-        sx3 = sx2*sx
-
-        c_xm1 = (2*sx2*h[0] - sx*h2[0] - sx3)*ih3[0]*0.5
-        c_x0 = (2*h3[0] - 5*h[0]*sx2 + 3*sx3)*ih3[0]*0.5
-        c_xp1 = (sx*h2[0] + 4*h[0]*sx2 - 3*sx3)*ih3[0]*0.5
-        c_xp2 = (sx3 - sx2*h[0])*ih3[0]*0.5
-
-        for j in range(npointsy):
-
-            iy = np.int64((py[j] - origin[1])*ih[1])
-
-            if (iy == shape[1] - 1):
-                iy -= 1
-
-            sy = py[j] - (origin[1] + h[1]*iy)
-            sy2 = sy**2
-            sy3 = sy2*sy
-
-            c_ym1 = (2*sy2*h[1] - sy*h2[1] - sy3)*ih3[1]*0.5
-            c_y0 = (2*h3[1] - 5*h[1]*sy2 + 3*sy3)*ih3[1]*0.5
-            c_yp1 = (sy*h2[1] + 4*h[1]*sy2 - 3*sy3)*ih3[1]*0.5
-            c_yp2 = (sy3 - sy2*h[1])*ih3[1]*0.5
-
-            for n in range(ndata):
-
-                f_x0_y0 = data[n][ix, iy]
-                f_xp1_y0 = data[n][ix + 1, iy]
-                f_xm1_y0 = data[n][ix - 1, iy]
-                f_xp2_y0 = data[n][ix + 2, iy]
-
-                f_x0_yp1 = data[n][ix, iy + 1]
-                f_xp1_yp1 = data[n][ix + 1, iy + 1]
-                f_xm1_yp1 = data[n][ix - 1, iy + 1]
-                f_xp2_yp1 = data[n][ix + 2, iy + 1]
-
-                f_x0_ym1 = data[n][ix, iy - 1]
-                f_xp1_ym1 = data[n][ix + 1, iy - 1]
-                f_xm1_ym1 = data[n][ix - 1, iy - 1]
-                f_xp2_ym1 = data[n][ix + 2, iy - 1]
-
-                f_x0_yp2 = data[n][ix, iy + 2]
-                f_xp1_yp2 = data[n][ix + 1, iy + 2]
-                f_xm1_yp2 = data[n][ix - 1, iy + 2]
-                f_xp2_yp2 = data[n][ix + 2, iy + 2]
-
-                result[n, i, j] = \
-                    (f_xm1_y0*c_xm1*c_y0 + f_x0_y0*c_x0*c_y0 +
-                     f_xp1_y0*c_xp1*c_y0 + f_xp2_y0*c_xp2*c_y0 +
-
-                     f_xm1_yp1*c_xm1*c_yp1 + f_x0_yp1*c_x0*c_yp1 +
-                     f_xp1_yp1*c_xp1*c_yp1 + f_xp2_yp1*c_xp2*c_yp1 +
-
-                     f_xm1_ym1*c_xm1*c_ym1 + f_x0_ym1*c_x0*c_ym1 +
-                     f_xp1_ym1*c_xp1*c_ym1 + f_xp2_ym1*c_xp2*c_ym1 +
-
-                     f_xm1_yp2*c_xm1*c_yp2 + f_x0_yp2*c_x0*c_yp2 +
-                     f_xp1_yp2*c_xp1*c_yp2 + f_xp2_yp2*c_xp2*c_yp2)
+            result[n, p] = (+ f_x00_y00*c_x00*c_y00 + f_xp1_y00*c_xp1*c_y00
+                            + f_xm1_y00*c_xm1*c_y00 + f_xp2_y00*c_xp2*c_y00
+                            + f_x00_yp1*c_x00*c_yp1 + f_xp1_yp1*c_xp1*c_yp1
+                            + f_xm1_yp1*c_xm1*c_yp1 + f_xp2_yp1*c_xp2*c_yp1
+                            + f_x00_ym1*c_x00*c_ym1 + f_xp1_ym1*c_xp1*c_ym1
+                            + f_xm1_ym1*c_xm1*c_ym1 + f_xp2_ym1*c_xp2*c_ym1
+                            + f_x00_yp2*c_x00*c_yp2 + f_xp1_yp2*c_xp1*c_yp2
+                            + f_xm1_yp2*c_xm1*c_yp2 + f_xp2_yp2*c_xp2*c_yp2)
 
     return result
 
 
 @njit(cache=True, fastmath=True)
-def chinterp3D(px, py, pz, origin, ih, *data):
-    """Cubic hermite interpolation of three-dimensional arrays at given points.
-
-    The derivatives of the interpolating polynomial are estimated with a
-    3-point centered stencil.
+def chinterp3D(p_x, p_y, p_z, o, ih, data):
+    """Cubic Hermite interpolation of three-dimensional arrays at given points.
 
     Arguments:
-    px     -- array of floats: interpolation points on the first axis
-    py     -- array of floats: interpolation points on the second axis
-    pz     -- array of floats: interpolation points on the third axis
-    origin -- array of floats, shape=(3,): first point of the grid
-    ih     -- array of floats, shape=(3,): inverse of the grid spacing
-    data   -- arrays of floats, each of shape=(s0, s1, s2): the data to
-              interpolate
+    p_x  -- 1D array:               interpolation points in x
+    p_y  -- 1D array of len(px):    interpolation points in y
+    p_z  -- 1D array of len(px):    interpolation points in z
+    o    -- 1D array of len 2:      first point of the grid
+    ih   -- 1D array of len 2:      inverse of the grid spacing
+    data -- array of shape (N, Nx, Ny, Nz): the data to be interpolated
 
     Returns:
-    result -- array of floats, shape=(len(data), len(px), len(py), len(pz)):
-              the result of the interpolation for each data array and each
-              point. The interpolation is carried out on the grid defined by
-              the cartesian product of the arrays px and py, i.e. at points
-              [(x, y) for x in px for y in py]
-
-    Notes:
-    No check is performed to ensure that the arguments have the right shapes.
-
-    Extrapolation is not handled: if the interpolation points is outside the
-    region covered by the data, the function will crash or (worse) silently
-    return nonsensical results. Furthermore, 2 ghost points are needed.
-
-    The interpolation is cubic. This leads to the common misconception that
-    the method is third order accurate with respect to the grid spacing. It is
-    actually fourth order accurate, i.e. the error term behaves asymptotically
-    as O(ih**4) (assuming the interpolation point is fixed as the grid
-    spacing shrinks).
+    result -- array of shape (N, len(px)): the result of
+              the interpolation for each data array at each point
     """
 
-    h = 1/ih
-    h2 = h**2
-    h3 = h2*h
-    ih3 = ih**3
-
-    npointsx = len(px)
-    npointsy = len(py)
-    npointsz = len(pz)
+    assert len(p_x) == len(p_y)
+    assert len(p_x) == len(p_z)
+    npoints = len(p_x)
 
     ndata = len(data)
 
     shape = data[0].shape
 
-    result = np.empty((ndata, npointsx, npointsy, npointsz),
-                      dtype=data[0].dtype)
+    result = np.empty((ndata, npoints), dtype=data[0].dtype)
 
-    for i in range(npointsx):
+    h = 1./ih
 
-        ix = np.int64((px[i] - origin[0])*ih[0])
+    for p in range(npoints):
 
-        if (ix == shape[0] - 1):
-            ix -= 1
+        i = np.int64((p_x[p] - o[0])*ih[0])
+        j = np.int64((p_y[p] - o[1])*ih[1])
+        k = np.int64((p_z[p] - o[2])*ih[2])
 
-        sx = px[i] - (origin[0] + h[0]*ix)
-        sx2 = sx**2
-        sx3 = sx2*sx
+        if (i == shape[0] - 1):
+            i -= 1
+        if (j == shape[1] - 1):
+            j -= 1
+        if (k == shape[2] - 1):
+            k -= 1
 
-        c_xm1 = (2*sx2*h[0] - sx*h2[0] - sx3)*ih3[0]*0.5
-        c_x0 = (2*h3[0] - 5*h[0]*sx2 + 3*sx3)*ih3[0]*0.5
-        c_xp1 = (sx*h2[0] + 4*h[0]*sx2 - 3*sx3)*ih3[0]*0.5
-        c_xp2 = (sx3 - sx2*h[0])*ih3[0]*0.5
+        s_x = (p_x[p] - (o[0] + h[0]*i))*ih[0]
+        s_y = (p_y[p] - (o[1] + h[1]*j))*ih[1]
+        s_z = (p_z[p] - (o[2] + h[2]*k))*ih[2]
 
-        for j in range(npointsy):
+        c_x00 = (1. + 2.*s_x)*(1. - s_x)**2 - 0.5*s_x**2*(s_x - 1.)
+        c_xp1 = s_x**2*(3. - 2.*s_x) + 0.5*s_x*(1. - s_x)**2
+        c_xm1 = -0.5*s_x*(1. - s_x)**2
+        c_xp2 = 0.5*s_x**2*(s_x - 1.)
+        c_y00 = (1. + 2.*s_y)*(1. - s_y)**2 - 0.5*s_y**2*(s_y - 1.)
+        c_yp1 = s_y**2*(3. - 2.*s_y) + 0.5*s_y*(1. - s_y)**2
+        c_ym1 = -0.5*s_y*(1. - s_y)**2
+        c_yp2 = 0.5*s_y**2*(s_y - 1.)
+        c_z00 = (1. + 2.*s_z)*(1. - s_z)**2 - 0.5*s_z**2*(s_z - 1.)
+        c_zp1 = s_z**2*(3. - 2.*s_z) + 0.5*s_z*(1. - s_z)**2
+        c_zm1 = -0.5*s_z*(1. - s_z)**2
+        c_zp2 = 0.5*s_z**2*(s_z - 1.)
 
-            iy = np.int64((py[j] - origin[1])*ih[1])
+        for n in range(ndata):
 
-            if (iy == shape[1] - 1):
-                iy -= 1
+            f_x00_y00_z00 = data[n][i, j, k]
+            f_xp1_y00_z00 = data[n][i + 1, j, k]
+            f_xm1_y00_z00 = data[n][i - 1, j, k]
+            f_xp2_y00_z00 = data[n][i + 2, j, k]
+            f_x00_yp1_z00 = data[n][i, j + 1, k]
+            f_xp1_yp1_z00 = data[n][i + 1, j + 1, k]
+            f_xm1_yp1_z00 = data[n][i - 1, j + 1, k]
+            f_xp2_yp1_z00 = data[n][i + 2, j + 1, k]
+            f_x00_ym1_z00 = data[n][i, j - 1, k]
+            f_xp1_ym1_z00 = data[n][i + 1, j - 1, k]
+            f_xm1_ym1_z00 = data[n][i - 1, j - 1, k]
+            f_xp2_ym1_z00 = data[n][i + 2, j - 1, k]
+            f_x00_yp2_z00 = data[n][i, j + 2, k]
+            f_xp1_yp2_z00 = data[n][i + 1, j + 2, k]
+            f_xm1_yp2_z00 = data[n][i - 1, j + 2, k]
+            f_xp2_yp2_z00 = data[n][i + 2, j + 2, k]
+            f_x00_y00_zp1 = data[n][i, j, k + 1]
+            f_xp1_y00_zp1 = data[n][i + 1, j, k + 1]
+            f_xm1_y00_zp1 = data[n][i - 1, j, k + 1]
+            f_xp2_y00_zp1 = data[n][i + 2, j, k + 1]
+            f_x00_yp1_zp1 = data[n][i, j + 1, k + 1]
+            f_xp1_yp1_zp1 = data[n][i + 1, j + 1, k + 1]
+            f_xm1_yp1_zp1 = data[n][i - 1, j + 1, k + 1]
+            f_xp2_yp1_zp1 = data[n][i + 2, j + 1, k + 1]
+            f_x00_ym1_zp1 = data[n][i, j - 1, k + 1]
+            f_xp1_ym1_zp1 = data[n][i + 1, j - 1, k + 1]
+            f_xm1_ym1_zp1 = data[n][i - 1, j - 1, k + 1]
+            f_xp2_ym1_zp1 = data[n][i + 2, j - 1, k + 1]
+            f_x00_yp2_zp1 = data[n][i, j + 2, k + 1]
+            f_xp1_yp2_zp1 = data[n][i + 1, j + 2, k + 1]
+            f_xm1_yp2_zp1 = data[n][i - 1, j + 2, k + 1]
+            f_xp2_yp2_zp1 = data[n][i + 2, j + 2, k + 1]
+            f_x00_y00_zm1 = data[n][i, j, k - 1]
+            f_xp1_y00_zm1 = data[n][i + 1, j, k - 1]
+            f_xm1_y00_zm1 = data[n][i - 1, j, k - 1]
+            f_xp2_y00_zm1 = data[n][i + 2, j, k - 1]
+            f_x00_yp1_zm1 = data[n][i, j + 1, k - 1]
+            f_xp1_yp1_zm1 = data[n][i + 1, j + 1, k - 1]
+            f_xm1_yp1_zm1 = data[n][i - 1, j + 1, k - 1]
+            f_xp2_yp1_zm1 = data[n][i + 2, j + 1, k - 1]
+            f_x00_ym1_zm1 = data[n][i, j - 1, k - 1]
+            f_xp1_ym1_zm1 = data[n][i + 1, j - 1, k - 1]
+            f_xm1_ym1_zm1 = data[n][i - 1, j - 1, k - 1]
+            f_xp2_ym1_zm1 = data[n][i + 2, j - 1, k - 1]
+            f_x00_yp2_zm1 = data[n][i, j + 2, k - 1]
+            f_xp1_yp2_zm1 = data[n][i + 1, j + 2, k - 1]
+            f_xm1_yp2_zm1 = data[n][i - 1, j + 2, k - 1]
+            f_xp2_yp2_zm1 = data[n][i + 2, j + 2, k - 1]
+            f_x00_y00_zp2 = data[n][i, j, k + 2]
+            f_xp1_y00_zp2 = data[n][i + 1, j, k + 2]
+            f_xm1_y00_zp2 = data[n][i - 1, j, k + 2]
+            f_xp2_y00_zp2 = data[n][i + 2, j, k + 2]
+            f_x00_yp1_zp2 = data[n][i, j + 1, k + 2]
+            f_xp1_yp1_zp2 = data[n][i + 1, j + 1, k + 2]
+            f_xm1_yp1_zp2 = data[n][i - 1, j + 1, k + 2]
+            f_xp2_yp1_zp2 = data[n][i + 2, j + 1, k + 2]
+            f_x00_ym1_zp2 = data[n][i, j - 1, k + 2]
+            f_xp1_ym1_zp2 = data[n][i + 1, j - 1, k + 2]
+            f_xm1_ym1_zp2 = data[n][i - 1, j - 1, k + 2]
+            f_xp2_ym1_zp2 = data[n][i + 2, j - 1, k + 2]
+            f_x00_yp2_zp2 = data[n][i, j + 2, k + 2]
+            f_xp1_yp2_zp2 = data[n][i + 1, j + 2, k + 2]
+            f_xm1_yp2_zp2 = data[n][i - 1, j + 2, k + 2]
+            f_xp2_yp2_zp2 = data[n][i + 2, j + 2, k + 2]
 
-            sy = py[j] - (origin[1] + h[1]*iy)
-            sy2 = sy**2
-            sy3 = sy2*sy
-
-            c_ym1 = (2*sy2*h[1] - sy*h2[1] - sy3)*ih3[1]*0.5
-            c_y0 = (2*h3[1] - 5*h[1]*sy2 + 3*sy3)*ih3[1]*0.5
-            c_yp1 = (sy*h2[1] + 4*h[1]*sy2 - 3*sy3)*ih3[1]*0.5
-            c_yp2 = (sy3 - sy2*h[1])*ih3[1]*0.5
-
-            for k in range(npointsz):
-
-                iz = np.int64((pz[k] - origin[2])*ih[2])
-
-                if (iz == shape[2] - 1):
-                    iz -= 1
-
-                sz = pz[k] - (origin[2] + h[2]*iy)
-                sz2 = sz**2
-                sz3 = sz2*sz
-
-                c_zm1 = (2*sz2*h[2] - sz*h2[2] - sz3)*ih3[2]*0.5
-                c_z0 = (2*h3[2] - 5*h[2]*sz2 + 3*sz3)*ih3[2]*0.5
-                c_zp1 = (sz*h2[2] + 4*h[2]*sz2 - 3*sz3)*ih3[2]*0.5
-                c_zp2 = (sz3 - sz2*h[2])*ih3[2]*0.5
-
-                for n in range(ndata):
-
-                    f_x0_y0_z0 = data[n][ix, iy, iz]
-                    f_xp1_y0_z0 = data[n][ix + 1, iy, iz]
-                    f_xm1_y0_z0 = data[n][ix - 1, iy, iz]
-                    f_xp2_y0_z0 = data[n][ix + 2, iy, iz]
-
-                    f_x0_yp1_z0 = data[n][ix, iy + 1, iz]
-                    f_xp1_yp1_z0 = data[n][ix + 1, iy + 1, iz]
-                    f_xm1_yp1_z0 = data[n][ix - 1, iy + 1, iz]
-                    f_xp2_yp1_z0 = data[n][ix + 2, iy + 1, iz]
-
-                    f_x0_ym1_z0 = data[n][ix, iy - 1, iz]
-                    f_xp1_ym1_z0 = data[n][ix + 1, iy - 1, iz]
-                    f_xm1_ym1_z0 = data[n][ix - 1, iy - 1, iz]
-                    f_xp2_ym1_z0 = data[n][ix + 2, iy - 1, iz]
-
-                    f_x0_yp2_z0 = data[n][ix, iy + 2, iz]
-                    f_xp1_yp2_z0 = data[n][ix + 1, iy + 2, iz]
-                    f_xm1_yp2_z0 = data[n][ix - 1, iy + 2, iz]
-                    f_xp2_yp2_z0 = data[n][ix + 2, iy + 2, iz]
-
-                    f_x0_y0_zp1 = data[n][ix, iy, iz + 1]
-                    f_xp1_y0_zp1 = data[n][ix + 1, iy, iz + 1]
-                    f_xm1_y0_zp1 = data[n][ix - 1, iy, iz + 1]
-                    f_xp2_y0_zp1 = data[n][ix + 2, iy, iz + 1]
-
-                    f_x0_yp1_zp1 = data[n][ix, iy + 1, iz + 1]
-                    f_xp1_yp1_zp1 = data[n][ix + 1, iy + 1, iz + 1]
-                    f_xm1_yp1_zp1 = data[n][ix - 1, iy + 1, iz + 1]
-                    f_xp2_yp1_zp1 = data[n][ix + 2, iy + 1, iz + 1]
-
-                    f_x0_ym1_zp1 = data[n][ix, iy - 1, iz + 1]
-                    f_xp1_ym1_zp1 = data[n][ix + 1, iy - 1, iz + 1]
-                    f_xm1_ym1_zp1 = data[n][ix - 1, iy - 1, iz + 1]
-                    f_xp2_ym1_zp1 = data[n][ix + 2, iy - 1, iz + 1]
-
-                    f_x0_yp2_zp1 = data[n][ix, iy + 2, iz + 1]
-                    f_xp1_yp2_zp1 = data[n][ix + 1, iy + 2, iz + 1]
-                    f_xm1_yp2_zp1 = data[n][ix - 1, iy + 2, iz + 1]
-                    f_xp2_yp2_zp1 = data[n][ix + 2, iy + 2, iz + 1]
-
-                    f_x0_y0_zm1 = data[n][ix, iy, iz - 1]
-                    f_xp1_y0_zm1 = data[n][ix + 1, iy, iz - 1]
-                    f_xm1_y0_zm1 = data[n][ix - 1, iy, iz - 1]
-                    f_xp2_y0_zm1 = data[n][ix + 2, iy, iz - 1]
-
-                    f_x0_yp1_zm1 = data[n][ix, iy + 1, iz - 1]
-                    f_xp1_yp1_zm1 = data[n][ix + 1, iy + 1, iz - 1]
-                    f_xm1_yp1_zm1 = data[n][ix - 1, iy + 1, iz - 1]
-                    f_xp2_yp1_zm1 = data[n][ix + 2, iy + 1, iz - 1]
-
-                    f_x0_ym1_zm1 = data[n][ix, iy - 1, iz - 1]
-                    f_xp1_ym1_zm1 = data[n][ix + 1, iy - 1, iz - 1]
-                    f_xm1_ym1_zm1 = data[n][ix - 1, iy - 1, iz - 1]
-                    f_xp2_ym1_zm1 = data[n][ix + 2, iy - 1, iz - 1]
-
-                    f_x0_yp2_zm1 = data[n][ix, iy + 2, iz - 1]
-                    f_xp1_yp2_zm1 = data[n][ix + 1, iy + 2, iz - 1]
-                    f_xm1_yp2_zm1 = data[n][ix - 1, iy + 2, iz - 1]
-                    f_xp2_yp2_zm1 = data[n][ix + 2, iy + 2, iz - 1]
-
-                    f_x0_y0_zp2 = data[n][ix, iy, iz + 2]
-                    f_xp1_y0_zp2 = data[n][ix + 1, iy, iz + 2]
-                    f_xm1_y0_zp2 = data[n][ix - 1, iy, iz + 2]
-                    f_xp2_y0_zp2 = data[n][ix + 2, iy, iz + 2]
-
-                    f_x0_yp1_zp2 = data[n][ix, iy + 1, iz + 2]
-                    f_xp1_yp1_zp2 = data[n][ix + 1, iy + 1, iz + 2]
-                    f_xm1_yp1_zp2 = data[n][ix - 1, iy + 1, iz + 2]
-                    f_xp2_yp1_zp2 = data[n][ix + 2, iy + 1, iz + 2]
-
-                    f_x0_ym1_zp2 = data[n][ix, iy - 1, iz + 2]
-                    f_xp1_ym1_zp2 = data[n][ix + 1, iy - 1, iz + 2]
-                    f_xm1_ym1_zp2 = data[n][ix - 1, iy - 1, iz + 2]
-                    f_xp2_ym1_zp2 = data[n][ix + 2, iy - 1, iz + 2]
-
-                    f_x0_yp2_zp2 = data[n][ix, iy + 2, iz + 2]
-                    f_xp1_yp2_zp2 = data[n][ix + 1, iy + 2, iz + 2]
-                    f_xm1_yp2_zp2 = data[n][ix - 1, iy + 2, iz + 2]
-                    f_xp2_yp2_zp2 = data[n][ix + 2, iy + 2, iz + 2]
-
-                    result[n, i, j, k] = \
-                        (f_xm1_y0_z0*c_xm1*c_y0*c_z0 +
-                         f_x0_y0_z0*c_x0*c_y0*c_z0 +
-                         f_xp1_y0_z0*c_xp1*c_y0*c_z0 +
-                         f_xp2_y0_z0*c_xp2*c_y0*c_z0 +
-
-                         f_xm1_yp1_z0*c_xm1*c_yp1*c_z0 +
-                         f_x0_yp1_z0*c_x0*c_yp1*c_z0 +
-                         f_xp1_yp1_z0*c_xp1*c_yp1*c_z0 +
-                         f_xp2_yp1_z0*c_xp2*c_yp1*c_z0 +
-
-                         f_xm1_ym1_z0*c_xm1*c_ym1*c_z0 +
-                         f_x0_ym1_z0*c_x0*c_ym1*c_z0 +
-                         f_xp1_ym1_z0*c_xp1*c_ym1*c_z0 +
-                         f_xp2_ym1_z0*c_xp2*c_ym1*c_z0 +
-
-                         f_xm1_yp2_z0*c_xm1*c_yp2*c_z0 +
-                         f_x0_yp2_z0*c_x0*c_yp2*c_z0 +
-                         f_xp1_yp2_z0*c_xp1*c_yp2*c_z0 +
-                         f_xp2_yp2_z0*c_xp2*c_yp2*c_z0 +
-
-                         f_xm1_y0_zp1*c_xm1*c_y0*c_zp1 +
-                         f_x0_y0_zp1*c_x0*c_y0*c_zp1 +
-                         f_xp1_y0_zp1*c_xp1*c_y0*c_zp1 +
-                         f_xp2_y0_zp1*c_xp2*c_y0*c_zp1 +
-
-                         f_xm1_yp1_zp1*c_xm1*c_yp1*c_zp1 +
-                         f_x0_yp1_zp1*c_x0*c_yp1*c_zp1 +
-                         f_xp1_yp1_zp1*c_xp1*c_yp1*c_zp1 +
-                         f_xp2_yp1_zp1*c_xp2*c_yp1*c_zp1 +
-
-                         f_xm1_ym1_zp1*c_xm1*c_ym1*c_zp1 +
-                         f_x0_ym1_zp1*c_x0*c_ym1*c_zp1 +
-                         f_xp1_ym1_zp1*c_xp1*c_ym1*c_zp1 +
-                         f_xp2_ym1_zp1*c_xp2*c_ym1*c_zp1 +
-
-                         f_xm1_yp2_zp1*c_xm1*c_yp2*c_zp1 +
-                         f_x0_yp2_zp1*c_x0*c_yp2*c_zp1 +
-                         f_xp1_yp2_zp1*c_xp1*c_yp2*c_zp1 +
-                         f_xp2_yp2_zp1*c_xp2*c_yp2*c_zp1 +
-
-                         f_xm1_y0_zm1*c_xm1*c_y0*c_zm1 +
-                         f_x0_y0_zm1*c_x0*c_y0*c_zm1 +
-                         f_xp1_y0_zm1*c_xp1*c_y0*c_zm1 +
-                         f_xp2_y0_zm1*c_xp2*c_y0*c_zm1 +
-
-                         f_xm1_yp1_zm1*c_xm1*c_yp1*c_zm1 +
-                         f_x0_yp1_zm1*c_x0*c_yp1*c_zm1 +
-                         f_xp1_yp1_zm1*c_xp1*c_yp1*c_zm1 +
-                         f_xp2_yp1_zm1*c_xp2*c_yp1*c_zm1 +
-
-                         f_xm1_ym1_zm1*c_xm1*c_ym1*c_zm1 +
-                         f_x0_ym1_zm1*c_x0*c_ym1*c_zm1 +
-                         f_xp1_ym1_zm1*c_xp1*c_ym1*c_zm1 +
-                         f_xp2_ym1_zm1*c_xp2*c_ym1*c_zm1 +
-
-                         f_xm1_yp2_zm1*c_xm1*c_yp2*c_zm1 +
-                         f_x0_yp2_zm1*c_x0*c_yp2*c_zm1 +
-                         f_xp1_yp2_zm1*c_xp1*c_yp2*c_zm1 +
-                         f_xp2_yp2_zm1*c_xp2*c_yp2*c_zm1 +
-
-                         f_xm1_y0_zp2*c_xm1*c_y0*c_zp2 +
-                         f_x0_y0_zp2*c_x0*c_y0*c_zp2 +
-                         f_xp1_y0_zp2*c_xp1*c_y0*c_zp2 +
-                         f_xp2_y0_zp2*c_xp2*c_y0*c_zp2 +
-
-                         f_xm1_yp1_zp2*c_xm1*c_yp1*c_zp2 +
-                         f_x0_yp1_zp2*c_x0*c_yp1*c_zp2 +
-                         f_xp1_yp1_zp2*c_xp1*c_yp1*c_zp2 +
-                         f_xp2_yp1_zp2*c_xp2*c_yp1*c_zp2 +
-
-                         f_xm1_ym1_zp2*c_xm1*c_ym1*c_zp2 +
-                         f_x0_ym1_zp2*c_x0*c_ym1*c_zp2 +
-                         f_xp1_ym1_zp2*c_xp1*c_ym1*c_zp2 +
-                         f_xp2_ym1_zp2*c_xp2*c_ym1*c_zp2 +
-
-                         f_xm1_yp2_zp2*c_xm1*c_yp2*c_zp2 +
-                         f_x0_yp2_zp2*c_x0*c_yp2*c_zp2 +
-                         f_xp1_yp2_zp2*c_xp1*c_yp2*c_zp2 +
-                         f_xp2_yp2_zp2*c_xp2*c_yp2*c_zp2)
+            result[n, p] = (+ f_x00_y00_z00*c_x00*c_y00*c_z00
+                            + f_xp1_y00_z00*c_xp1*c_y00*c_z00
+                            + f_xm1_y00_z00*c_xm1*c_y00*c_z00
+                            + f_xp2_y00_z00*c_xp2*c_y00*c_z00
+                            + f_x00_yp1_z00*c_x00*c_yp1*c_z00
+                            + f_xp1_yp1_z00*c_xp1*c_yp1*c_z00
+                            + f_xm1_yp1_z00*c_xm1*c_yp1*c_z00
+                            + f_xp2_yp1_z00*c_xp2*c_yp1*c_z00
+                            + f_x00_ym1_z00*c_x00*c_ym1*c_z00
+                            + f_xp1_ym1_z00*c_xp1*c_ym1*c_z00
+                            + f_xm1_ym1_z00*c_xm1*c_ym1*c_z00
+                            + f_xp2_ym1_z00*c_xp2*c_ym1*c_z00
+                            + f_x00_yp2_z00*c_x00*c_yp2*c_z00
+                            + f_xp1_yp2_z00*c_xp1*c_yp2*c_z00
+                            + f_xm1_yp2_z00*c_xm1*c_yp2*c_z00
+                            + f_xp2_yp2_z00*c_xp2*c_yp2*c_z00
+                            + f_x00_y00_zp1*c_x00*c_y00*c_zp1
+                            + f_xp1_y00_zp1*c_xp1*c_y00*c_zp1
+                            + f_xm1_y00_zp1*c_xm1*c_y00*c_zp1
+                            + f_xp2_y00_zp1*c_xp2*c_y00*c_zp1
+                            + f_x00_yp1_zp1*c_x00*c_yp1*c_zp1
+                            + f_xp1_yp1_zp1*c_xp1*c_yp1*c_zp1
+                            + f_xm1_yp1_zp1*c_xm1*c_yp1*c_zp1
+                            + f_xp2_yp1_zp1*c_xp2*c_yp1*c_zp1
+                            + f_x00_ym1_zp1*c_x00*c_ym1*c_zp1
+                            + f_xp1_ym1_zp1*c_xp1*c_ym1*c_zp1
+                            + f_xm1_ym1_zp1*c_xm1*c_ym1*c_zp1
+                            + f_xp2_ym1_zp1*c_xp2*c_ym1*c_zp1
+                            + f_x00_yp2_zp1*c_x00*c_yp2*c_zp1
+                            + f_xp1_yp2_zp1*c_xp1*c_yp2*c_zp1
+                            + f_xm1_yp2_zp1*c_xm1*c_yp2*c_zp1
+                            + f_xp2_yp2_zp1*c_xp2*c_yp2*c_zp1
+                            + f_x00_y00_zm1*c_x00*c_y00*c_zm1
+                            + f_xp1_y00_zm1*c_xp1*c_y00*c_zm1
+                            + f_xm1_y00_zm1*c_xm1*c_y00*c_zm1
+                            + f_xp2_y00_zm1*c_xp2*c_y00*c_zm1
+                            + f_x00_yp1_zm1*c_x00*c_yp1*c_zm1
+                            + f_xp1_yp1_zm1*c_xp1*c_yp1*c_zm1
+                            + f_xm1_yp1_zm1*c_xm1*c_yp1*c_zm1
+                            + f_xp2_yp1_zm1*c_xp2*c_yp1*c_zm1
+                            + f_x00_ym1_zm1*c_x00*c_ym1*c_zm1
+                            + f_xp1_ym1_zm1*c_xp1*c_ym1*c_zm1
+                            + f_xm1_ym1_zm1*c_xm1*c_ym1*c_zm1
+                            + f_xp2_ym1_zm1*c_xp2*c_ym1*c_zm1
+                            + f_x00_yp2_zm1*c_x00*c_yp2*c_zm1
+                            + f_xp1_yp2_zm1*c_xp1*c_yp2*c_zm1
+                            + f_xm1_yp2_zm1*c_xm1*c_yp2*c_zm1
+                            + f_xp2_yp2_zm1*c_xp2*c_yp2*c_zm1
+                            + f_x00_y00_zp2*c_x00*c_y00*c_zp2
+                            + f_xp1_y00_zp2*c_xp1*c_y00*c_zp2
+                            + f_xm1_y00_zp2*c_xm1*c_y00*c_zp2
+                            + f_xp2_y00_zp2*c_xp2*c_y00*c_zp2
+                            + f_x00_yp1_zp2*c_x00*c_yp1*c_zp2
+                            + f_xp1_yp1_zp2*c_xp1*c_yp1*c_zp2
+                            + f_xm1_yp1_zp2*c_xm1*c_yp1*c_zp2
+                            + f_xp2_yp1_zp2*c_xp2*c_yp1*c_zp2
+                            + f_x00_ym1_zp2*c_x00*c_ym1*c_zp2
+                            + f_xp1_ym1_zp2*c_xp1*c_ym1*c_zp2
+                            + f_xm1_ym1_zp2*c_xm1*c_ym1*c_zp2
+                            + f_xp2_ym1_zp2*c_xp2*c_ym1*c_zp2
+                            + f_x00_yp2_zp2*c_x00*c_yp2*c_zp2
+                            + f_xp1_yp2_zp2*c_xp1*c_yp2*c_zp2
+                            + f_xm1_yp2_zp2*c_xm1*c_yp2*c_zp2
+                            + f_xp2_yp2_zp2*c_xp2*c_yp2*c_zp2)
 
     return result
+
+
+@njit(cache=True, fastmath=True)
+def spchinterp_kernel(s, f_m1, f_00, f_p1, f_p2):
+
+    c_0 = (1. + 2.*s)*(1. - s)**2
+    c_1 = s**2*(3. - 2.*s)
+    c_d0 = s*(1. - s)**2
+    c_d1 = s**2*(s - 1.)
+
+    if (f_00 - f_m1)*(f_p1 - f_00) <= 0.:
+        d_0 = 0.
+    else:
+        d_0 = 2./(1./(f_00 - f_m1) + 1./(f_p1 - f_00))
+
+    if (f_p1 - f_00)*(f_p2 - f_p1) <= 0.:
+        d_1 = 0.
+    else:
+        d_1 = 2./(1./(f_p1 - f_00) + 1./(f_p2 - f_p1))
+
+    return f_00*c_0 + f_p1*c_1 + d_0*c_d0 + d_1*c_d1
+
+
+@njit(cache=True, fastmath=True)
+def spchinterp1D(p_x, o, ih, data):
+    """Shape-preserving cubic Hermite interpolation of one-dimensional arrays
+    at given points.
+
+    Arguments:
+    p_x  -- 1D array:               interpolation points in x
+    o    -- scalar:                 first point of the grid
+    ih   -- scalar:                 inverse of the grid spacing
+    data -- array of shape (N, Nx): the data to be interpolated
+
+    Returns:
+    result -- array of shape (N, len(px)): the result of
+              the interpolation for each data array at each point
+    """
+
+    npoints = len(p_x)
+
+    ndata = len(data)
+
+    shape = len(data[0])
+
+    result = np.empty((ndata, npoints), dtype=data[0].dtype)
+
+    h = 1./ih
+
+    for p in range(npoints):
+
+        i = np.int64((p_x[p] - o)*ih)
+
+        if (i == shape - 1):
+            i -= 1
+
+        s_x = (p_x[p] - (o + h*i))*ih
+
+        for n in range(ndata):
+
+            f_x00 = data[n][i]
+            f_xp1 = data[n][i + 1]
+            f_xm1 = data[n][i - 1]
+            f_xp2 = data[n][i + 2]
+
+            result[n, p] = spchinterp_kernel(s_x, f_xm1, f_x00, f_xp1, f_xp2)
+
+    return result
+
+
+# elucipy{Uniform Interpolation}{
+# Functions to handle interpolation of data defined on regular grids.  The
+# functions in this module implement a few methods to interpolate data
+# contained in numpy arrays. The data to interpolate can have 1, 2 or 3
+# dimensions, and it is constrained to be defined on an equally spaced grid.
+
+# Equally spaced means that on each axis the grid must be of the form
+# \(x_i = x_0 + i\Delta\). That is, the grid spacing delta between two adjacent
+# points must be a constant.
+
+# This means that, e.g. in one dimension the values y = [0, 1, 4, 9], the
+# result of applying the function \(f(x) = x^2\) to the points x = [0, 1, 2,
+# 3] can be interpolated using the functions provided here, but data defined on
+# the grid x = [0, 1, 2.5, 6.8] cannot.
+
+# This restriction allows for much greater speed than e.g.
+# scipy.interpolate.interpn, because the location of the interpolation point on
+# the grid can be carried out in \(O(1)\) operations, instead of
+# \(O(\log(N))\) (binary search).
+
+# The implementation is sped-up using Numba. The implementation is also not
+# parallelized.
+
+# The functions collected here are optimized for speed and not safety:<br>
+# - they do not (generally) check for size mismatches in the
+# passed arguments<br>
+# - they are intended to work with 64 bit floating point data
+# ("double precision"), but no check is performed on the argumets to ensure
+# they are of the correct type<br>
+# - extrapolation is not handled: if an interpolation points is outside the
+# region covered by the data (accounting also for any eventual ghost points
+# needed), the functions will crash or (worse) silently return nonsensical
+# results.
+
+# The module includes the following functions:<br>
+
+# <a href="#line-9">linterp1D</a>: linear interpolation in 1D<br>
+# <a href="#line-68">linterp2D</a>: linear interpolation in 2D<br>
+# <a href="#line-124">linterp3D</a>: linear interpolation in 3D<br>
+# These functions are second order accurate in the grid spacing and
+# require no ghosts. They cannot overshoot the data or generate spurious
+# extrema, but the interpolant is in general continuous but not differentiable.
+
+# <a href="#line-202">chinterp1D</a>: cubic Hermite interpolation in 1D<br>
+# <a href="#line-270">chinterp2D</a>: cubic Hermite interpolation in 2D<br>
+# <a href="#line-350">chinterp3D</a>: cubic Hermite interpolation in 3D<br>
+# These functions are third order accurate in the grid spacing and require 1
+# ghosts point on each axis. They can overshoot the data and/or generate
+# spurious extrema. The interpolant is guaranteed to be \(C^1\). The
+# derivatives of the data are implicitly estimated using second order accurate
+# three point stencils (making the interpolant 3rd order instead of 4th order
+# accurate, which would be the case if the derivatives were known exactly).
+
+# <a href="#line-565">spchinterp1D</a>: shape-preserving cubic Hermite
+# interpolation in 1D<br>
+# This function is generally third order accurate in the grid spacing, but has
+# typically larger errors than the Hermite functions above. It requires 1
+# ghosts point. The algorith however cannot overshoot the data or generate
+# spurious extrema. The interpolant is guaranteed to be \(C^1\).
+# }
