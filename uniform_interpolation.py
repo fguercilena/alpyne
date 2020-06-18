@@ -42,7 +42,7 @@ def linterp1D(p_x, o, ih, data):
         # the interpolation point
         i = np.int64(aux_x)
 
-        if (i == shape - 1):
+        if i == shape - 1:
             i -= 1
 
         # Compute the interpolation coefficients. c_x0 is applied to the point
@@ -97,9 +97,9 @@ def linterp2D(p_x, p_y, o, ih, data):
         i = np.int64(aux_x)
         j = np.int64(aux_y)
 
-        if (i == shape[0] - 1):
+        if i == shape[0] - 1:
             i -= 1
-        if (j == shape[1] - 1):
+        if j == shape[1] - 1:
             j -= 1
 
         c_x1 = aux_x - i
@@ -157,11 +157,11 @@ def linterp3D(p_x, p_y, p_z, o, ih, data):
         j = np.int64(aux_y)
         k = np.int64(aux_z)
 
-        if (i == shape[0] - 1):
+        if i == shape[0] - 1:
             i -= 1
-        if (j == shape[1] - 1):
+        if j == shape[1] - 1:
             j -= 1
-        if (k == shape[2] - 1):
+        if k == shape[2] - 1:
             k -= 1
 
         c_x1 = aux_x - i
@@ -235,7 +235,7 @@ def chinterp1D(p_x, o, ih, data):
         # the interpolation point
         i = np.int64((p_x[p] - o)*ih)
 
-        if (i == shape - 1):
+        if i == shape - 1:
             i -= 1
 
         # Compute the displacement of the interpolation point from the point of
@@ -298,9 +298,9 @@ def chinterp2D(p_x, p_y, o, ih, data):
         i = np.int64((p_x[p] - o[0])*ih[0])
         j = np.int64((p_y[p] - o[1])*ih[1])
 
-        if (i == shape[0] - 1):
+        if i == shape[0] - 1:
             i -= 1
-        if (j == shape[1] - 1):
+        if j == shape[1] - 1:
             j -= 1
 
         s_x = (p_x[p] - (o[0] + h[0]*i))*ih[0]
@@ -381,11 +381,11 @@ def chinterp3D(p_x, p_y, p_z, o, ih, data):
         j = np.int64((p_y[p] - o[1])*ih[1])
         k = np.int64((p_z[p] - o[2])*ih[2])
 
-        if (i == shape[0] - 1):
+        if i == shape[0] - 1:
             i -= 1
-        if (j == shape[1] - 1):
+        if j == shape[1] - 1:
             j -= 1
-        if (k == shape[2] - 1):
+        if k == shape[2] - 1:
             k -= 1
 
         s_x = (p_x[p] - (o[0] + h[0]*i))*ih[0]
@@ -591,7 +591,7 @@ def spchinterp1D(p_x, o, ih, data):
 
         i = np.int64((p_x[p] - o)*ih)
 
-        if (i == shape - 1):
+        if i == shape - 1:
             i -= 1
 
         s_x = (p_x[p] - (o + h*i))*ih
